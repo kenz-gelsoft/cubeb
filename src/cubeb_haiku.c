@@ -20,11 +20,12 @@
 #define NBUFS 2
 #define FRAME_SIZE 2048
 
+// it seems unused
 struct cubeb_stream_item {
   cubeb_stream * stream;
 };
 
-static struct cubeb_ops const audiotrack_ops;
+static struct cubeb_ops const sndio_ops;
 
 struct cubeb {
   struct cubeb_ops const * ops;
@@ -34,11 +35,11 @@ struct cubeb {
 struct cubeb_stream {
   /* Note: Must match cubeb_stream layout in cubeb.c. */
   cubeb * context;
-  void * user_ptr;
+  void * user_ptr; // arg in sndio, passed to callbacks
   /**/
-  cubeb_stream_params params;
-  cubeb_data_callback data_callback;
-  cubeb_state_callback state_callback;
+  cubeb_stream_params params; // ommitted in sndio
+  cubeb_data_callback data_callback;   // _cb in sndio
+  cubeb_state_callback state_callback; // _cb in sndio
 
   // backend specific part
   HKAI hkai;
@@ -62,11 +63,12 @@ bytes_to_frames(long bytes, cubeb_stream_params params)
 }
 
 static void
-audiotrack_destroy(cubeb * ctx);
+sndio_destroy(cubeb * ctx);
 
 /*static*/ int
-audiotrack_init(cubeb ** context, char const * context_name)
+sndio_init(cubeb ** context, char const * context_name)
 {
+  // other backend used heap if dynamic size required
   cubeb * ctx;
 
   XASSERT(context);
@@ -79,83 +81,22 @@ audiotrack_init(cubeb ** context, char const * context_name)
   ctx = calloc(1, sizeof(*ctx));
   XASSERT(ctx);
 
-  ctx->ops = &audiotrack_ops;
+  ctx->ops = &sndio_ops;
 
   *context = ctx;
 
   return CUBEB_OK;
 }
 
-static // can be static because this will be exported through fn ptr
-char const *
-audiotrack_get_backend_id(cubeb * ctx)
+// can be static because this will be exported through fn ptr
+static char const *
+sndio_get_backend_id(cubeb * ctx)
 {
   return "kai";
 }
 
-static int
-audiotrack_get_max_channel_count(cubeb * ctx, uint32_t * max_channels)
-{
-  XASSERT(ctx && max_channels);
-
-  // limited to max 2 channels is common
-  *max_channels = MAX_CHANNELS;
-
-  return CUBEB_OK;
-}
-
-static int
-audiotrack_get_min_latency(cubeb * ctx, cubeb_stream_params params,
-                           uint32_t * latency)
-{
-  /* We have at least two buffers. One is being played, the other one is being
-     filled. So there is as much latency as one buffer. */
-  *latency = FRAME_SIZE;
-  // other backend set to min_frame_count (but it states it wont be used)
-  return CUBEB_OK;
-}
-
-static int
-audiotrack_get_preferred_sample_rate(cubeb * ctx, uint32_t * rate)
-{
-  // completely backend specific
-  cubeb_stream_params params;
-  KAISPEC wanted_spec;
-  KAISPEC spec;
-  HKAI hkai;
-
-  params.format = CUBEB_SAMPLE_S16NE;
-  params.rate = 48000;
-  params.channels = 2;
-
-  wanted_spec.usDeviceIndex = 0;
-  wanted_spec.ulType = KAIT_PLAY;
-  wanted_spec.ulBitsPerSample = BPS_16;
-  wanted_spec.ulSamplingRate = params.rate;
-  wanted_spec.ulDataFormat = MCI_WAVE_FORMAT_PCM;
-  wanted_spec.ulChannels = params.channels;
-  wanted_spec.ulNumBuffers = NBUFS;
-  wanted_spec.ulBufferSize = frames_to_bytes(FRAME_SIZE, params);
-  wanted_spec.fShareable = TRUE;
-  wanted_spec.pfnCallBack = audiotrack_callback;
-  wanted_spec.pCallBackData = NULL;
-
-  /* Test 48KHz */
-  if (kaiOpen(&wanted_spec, &spec, &hkai)) {
-    /* Not supported. Fall back to 44.1KHz */
-    params.rate = 44100;
-  } else {
-    /* Supported. Use 48KHz */
-    kaiClose(hkai);
-  }
-
-  *rate = params.rate;
-
-  return CUBEB_OK;
-}
-
 static void
-audiotrack_destroy(cubeb * context)
+sndio_destroy(cubeb * context)
 {
   // platform teardown code here
   // assert(context) if you access to its members
@@ -180,7 +121,7 @@ float_to_s16ne(int16_t * dst, float * src, size_t n)
 }
 
 static ULONG APIENTRY
-audiotrack_callback(PVOID cbdata, PVOID buffer, ULONG len)
+sndio_callback(PVOID cbdata, PVOID buffer, ULONG len)
 {
   cubeb_stream * stm = cbdata;
   void * p;
@@ -217,15 +158,16 @@ audiotrack_callback(PVOID cbdata, PVOID buffer, ULONG len)
 }
 
 static void
-audiotrack_stream_destroy(cubeb_stream * stm);
+sndio_stream_destroy(cubeb_stream * stm);
 
 static int
-audiotrack_stream_init(cubeb * context, cubeb_stream ** stream,
+sndio_stream_init(cubeb * context, cubeb_stream ** stream,
                 char const * stream_name, cubeb_devid input_device,
                 cubeb_stream_params * input_stream_params,
                 cubeb_devid output_device,
                 cubeb_stream_params * output_stream_params,
-                unsigned int latency, cubeb_data_callback data_callback,
+                unsigned int latency, // _ms in android, _frames for other platforms?
+                cubeb_data_callback data_callback,
                 cubeb_state_callback state_callback, void * user_ptr)
 {
   cubeb_stream * stm;
@@ -259,6 +201,7 @@ audiotrack_stream_init(cubeb * context, cubeb_stream ** stream,
   stm = calloc(1, sizeof(*stm));
   XASSERT(stm);
 
+  // stm(stream) settings for cubeb
   stm->context = context;
   stm->params = *output_stream_params;
   stm->data_callback = data_callback;
@@ -273,6 +216,7 @@ audiotrack_stream_init(cubeb * context, cubeb_stream ** stream,
     return CUBEB_ERROR;
   }
 
+  // backend specific settings for platform API
   wanted_spec.usDeviceIndex = 0;
   wanted_spec.ulType = KAIT_PLAY;
   wanted_spec.ulBitsPerSample = BPS_16;
@@ -282,7 +226,7 @@ audiotrack_stream_init(cubeb * context, cubeb_stream ** stream,
   wanted_spec.ulNumBuffers = NBUFS;
   wanted_spec.ulBufferSize = frames_to_bytes(FRAME_SIZE, stm->params);
   wanted_spec.fShareable = TRUE;
-  wanted_spec.pfnCallBack = audiotrack_callback;
+  wanted_spec.pfnCallBack = sndio_callback;
   wanted_spec.pCallBackData = stm;
 
   if (kaiOpen(&wanted_spec, &stm->spec, &stm->hkai)) {
@@ -297,8 +241,71 @@ audiotrack_stream_init(cubeb * context, cubeb_stream ** stream,
   return CUBEB_OK;
 }
 
+static int
+sndio_get_max_channel_count(cubeb * ctx, uint32_t * max_channels)
+{
+  XASSERT(ctx && max_channels);
+
+  // limited to max fixed count of channels (c.f. 2 or 8) is common
+  *max_channels = MAX_CHANNELS;
+
+  return CUBEB_OK;
+}
+
+static int
+sndio_get_preferred_sample_rate(cubeb * ctx, uint32_t * rate)
+{
+  // completely backend specific
+  // assining fixed rate is OK (c.f. sndio)
+  cubeb_stream_params params;
+  KAISPEC wanted_spec;
+  KAISPEC spec;
+  HKAI hkai;
+
+  params.format = CUBEB_SAMPLE_S16NE;
+  params.rate = 48000;
+  params.channels = 2;
+
+  wanted_spec.usDeviceIndex = 0;
+  wanted_spec.ulType = KAIT_PLAY;
+  wanted_spec.ulBitsPerSample = BPS_16;
+  wanted_spec.ulSamplingRate = params.rate;
+  wanted_spec.ulDataFormat = MCI_WAVE_FORMAT_PCM;
+  wanted_spec.ulChannels = params.channels;
+  wanted_spec.ulNumBuffers = NBUFS;
+  wanted_spec.ulBufferSize = frames_to_bytes(FRAME_SIZE, params);
+  wanted_spec.fShareable = TRUE;
+  wanted_spec.pfnCallBack = sndio_callback;
+  wanted_spec.pCallBackData = NULL;
+
+  /* Test 48KHz */
+  if (kaiOpen(&wanted_spec, &spec, &hkai)) {
+    /* Not supported. Fall back to 44.1KHz */
+    params.rate = 44100;
+  } else {
+    /* Supported. Use 48KHz */
+    kaiClose(hkai);
+  }
+
+  *rate = params.rate;
+
+  return CUBEB_OK;
+}
+
+static int
+sndio_get_min_latency(cubeb * ctx, cubeb_stream_params params,
+                      uint32_t * latency) // _ms on Android, _frames on other platforms
+{
+  /* We have at least two buffers. One is being played, the other one is being
+     filled. So there is as much latency as one buffer. */
+  *latency = FRAME_SIZE;
+  // 2048 on sndio
+  // other backend set to min_frame_count (but it states it wont be used)
+  return CUBEB_OK;
+}
+
 static void
-audiotrack_stream_destroy(cubeb_stream * stream)
+sndio_stream_destroy(cubeb_stream * stream)
 {
   kaiClose(stream->hkai);
   _fmutex_close(&stream->mutex);
@@ -307,43 +314,58 @@ audiotrack_stream_destroy(cubeb_stream * stream)
 }
 
 static int
-audiotrack_stream_start(cubeb_stream * stm)
+sndio_stream_start(cubeb_stream * stm)
 {
   if (kaiPlay(stm->hkai))
     return CUBEB_ERROR;
 
  
   // above is backend specific
+  // sndio pthread_create for its mainloop to pump events to callbacks
   stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_STARTED);
 
   return CUBEB_OK;
 }
 
 static int
-audiotrack_stream_stop(cubeb_stream * stm)
+sndio_stream_stop(cubeb_stream * s)
 {
-  if (kaiStop(stm->hkai))
+  if (kaiStop(s->hkai))
     return CUBEB_ERROR;
 
   // above is backend specific
-  stm->state_callback(stm, stm->user_ptr, CUBEB_STATE_STOPPED);
+  // sndio pthread_join stop pumping events
+  s->state_callback(stm, s->user_ptr, CUBEB_STATE_STOPPED);
 
   return CUBEB_OK;
 }
 
 static int
-audiotrack_stream_get_position(cubeb_stream * stm, uint64_t * position)
+sndio_stream_get_position(cubeb_stream * s, uint64_t * p)
 {
   // mutex usage is backend specific
-  _fmutex_request(&stm->mutex, 0);
-  *position = stm->total_frames;
-  _fmutex_release(&stm->mutex);
+  // audiotrack didn't use
+  _fmutex_request(&s->mutex, 0);
+  *p = s->total_frames;
+  _fmutex_release(&s->mutex);
 
   return CUBEB_OK;
 }
 
 static int
-audiotrack_stream_get_latency(cubeb_stream * stm, uint32_t * latency)
+sndio_stream_set_volume(cubeb_stream * s, float volume)
+{
+  // completely backend specific
+  // using mutex is common, audiotrack didn't use
+  _fmutex_request(&s->mutex, 0);
+  s->soft_volume = volume;
+  _fmutex_release(&s->mutex);
+
+  return CUBEB_OK;
+}
+
+static int
+sndio_stream_get_latency(cubeb_stream * stm, uint32_t * latency)
 {
   // completely backend specific
   /* Out of buffers, one is being played, the others are being filled.
@@ -354,35 +376,42 @@ audiotrack_stream_get_latency(cubeb_stream * stm, uint32_t * latency)
   return CUBEB_OK;
 }
 
+#if 0
 static int
-audiotrack_stream_set_volume(cubeb_stream * stm, float volume)
+sndio_enumerate_devices(cubeb * context, cubeb_device_type type,
+                        cubeb_device_collection * collection)
 {
-  // completely backend specific
-  _fmutex_request(&stm->mutex, 0);
-  stm->soft_volume = volume;
-  _fmutex_release(&stm->mutex);
-
-  return CUBEB_OK;
+  // not implemented in kai, audiotrack
+  return CUBEB_ERROR;
 }
 
-static struct cubeb_ops const audiotrack_ops = {
-    .init = audiotrack_init,
-    .get_backend_id = audiotrack_get_backend_id,
-    .get_max_channel_count = audiotrack_get_max_channel_count,
-    .get_min_latency = audiotrack_get_min_latency,
-    .get_preferred_sample_rate = audiotrack_get_preferred_sample_rate,
+static int
+sndio_device_collection_destroy(cubeb * context,
+                                cubeb_device_collection * collection)
+{
+  // not implemented in kai, audiotrack
+  return CUBEB_ERROR;
+}
+#endif
+
+static struct cubeb_ops const sndio_ops = {
+    .init = sndio_init,
+    .get_backend_id = sndio_get_backend_id,
+    .get_max_channel_count = sndio_get_max_channel_count,
+    .get_min_latency = sndio_get_min_latency,
+    .get_preferred_sample_rate = sndio_get_preferred_sample_rate,
     .get_supported_input_processing_params = NULL,
     .enumerate_devices = NULL,
     .device_collection_destroy = NULL,
-    .destroy = audiotrack_destroy,
-    .stream_init = audiotrack_stream_init,
-    .stream_destroy = audiotrack_stream_destroy,
-    .stream_start = audiotrack_stream_start,
-    .stream_stop = audiotrack_stream_stop,
-    .stream_get_position = audiotrack_stream_get_position,
-    .stream_get_latency = audiotrack_stream_get_latency,
-    .stream_get_input_latency = NULL,
-    .stream_set_volume = audiotrack_stream_set_volume,
+    .destroy = sndio_destroy,
+    .stream_init = sndio_stream_init,
+    .stream_destroy = sndio_stream_destroy,
+    .stream_start = sndio_stream_start,
+    .stream_stop = sndio_stream_stop,
+    .stream_get_position = sndio_stream_get_position,
+    .stream_get_latency = sndio_stream_get_latency,
+    .stream_get_input_latency = NULL, // not specified NULL explicitly in sndio
+    .stream_set_volume = sndio_stream_set_volume,
     .stream_set_name = NULL,
     .stream_get_current_device = NULL,
     .stream_set_input_mute = NULL,
